@@ -137,6 +137,9 @@ if (ENV_IS_WORKER) {
 } else {
 	// ===================== MAIN THREAD =====================
 
+	// Force array-buffer compilation (streaming can fail with COEP)
+	delete WebAssembly.instantiateStreaming;
+
 	console.log('MAIN: pre.js loaded');
 
 	const _origAddDep = addRunDependency;

@@ -186,6 +186,22 @@ if (ENV_IS_WORKER) {
 } else {
 	// ===================== MAIN THREAD =====================
 
+	// Force array-buffer compilation (streaming can fail with COEP)
+	delete WebAssembly.instantiateStreaming;
+
+	console.log('MAIN: pre.js loaded');
+
+	const _origAddDep = addRunDependency;
+	const _origRemoveDep = removeRunDependency;
+	addRunDependency = function(id) {
+		console.log('MAIN addRunDependency:', id);
+		_origAddDep(id);
+	};
+	removeRunDependency = function(id) {
+		console.log('MAIN removeRunDependency:', id);
+		_origRemoveDep(id);
+	};
+
 	let _lock = null, _meta = null, _data = null
 
 	Module.registerFSBuffers = function (lockBuf, metaBuf, dataBuf) {
@@ -33099,6 +33115,10 @@ run();
 
 	window.addEventListener('beforeunload', function (event) {
 		event.preventDefault()
+	})
+
+	window.addEventListener('unhandledrejection', function (event) {
+		console.error('UNHANDLED REJECTION:', event.reason?.message || event.reason);
 	})
 
 	canvasElement.onkeypress = e => e.preventDefault()
