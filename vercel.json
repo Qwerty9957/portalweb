@@ -1,6 +1,4 @@
 {
-  "outputDirectory": "build/install",
-  "cleanUrls": true,
   "headers": [
     {
       "source": "/(.*)",
@@ -24,6 +22,7 @@
     }
   ],
   "rewrites": [
-    { "source": "/", "destination": "/hl2_launcher.html" }
+    { "source": "/", "destination": "/build/install/hl2_launcher.html" },
+    { "source": "/(.+)", "destination": "/build/install/$1" }
   ]
 }
