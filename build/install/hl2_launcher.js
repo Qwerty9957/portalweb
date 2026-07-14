@@ -242,11 +242,12 @@ if (ENV_IS_WORKER) {
 	}
 
 	Module._pathExistsInFolder = function (path) {
-		return Module._dirIndex && Module._dirIndex.has(path.toLowerCase())
+		return Module._dirIndex && Module._dirIndex.has(path.replace(/^\/+/, '').toLowerCase())
 	}
 
 	Module._readFileFromFolder = async function (path) {
-		const handle = Module._dirIndex && Module._dirIndex.get(path.toLowerCase())
+		const clean = path.replace(/^\/+/, '').toLowerCase()
+		const handle = Module._dirIndex && Module._dirIndex.get(clean)
 		if (!handle) return null
 		const file = await handle.getFile()
 		return new Uint8Array(await file.arrayBuffer())
@@ -254,7 +255,8 @@ if (ENV_IS_WORKER) {
 
 	Module._writeFileToFolder = async function (path, data) {
 		if (!Module._rootHandle) return
-		const parts = path.split('/')
+		const clean = path.replace(/^\/+/, '')
+		const parts = clean.split('/')
 		const fileName = parts.pop()
 		let cur = Module._rootHandle
 		for (const part of parts) {
