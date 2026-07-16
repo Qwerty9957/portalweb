@@ -410,9 +410,34 @@ if (ENV_IS_WORKER) {
 				console.warn('MAIN critical file not found: ' + vfsPath)
 			}
 		}
-		// Also install FS overrides on the main thread for any on-demand file loading
+		// Install FS overrides on the main thread for on-demand file loading.
+		// The filesystem module runs on the main thread (dlopen proxying), so
+		// we need to trigger async loads when files are found in OPFS but not MEMFS.
+		// The C code retries some files, and subsequent opens will find them in MEMFS.
 		var _populating = false
+		var _pendingAsyncLoads = new Set()
 		function isENOENT(e) { return Math.abs(e.errno) === 2 || Math.abs(e.errno) === 44 }
+
+		function _triggerAsyncLoad(resolved, clean) {
+			if (_pendingAsyncLoads.has(resolved)) return
+			_pendingAsyncLoads.add(resolved)
+			setTimeout(async function() {
+				try {
+					var data = await Module._readFileFromFolder('/' + clean)
+					if (data) {
+						var parts = resolved.split('/')
+						parts.pop()
+						if (parts.length) {
+							try { FS.mkdirTree(parts.join('/')) } catch (e) {}
+						}
+						FS.writeFile(resolved, new Uint8Array(data))
+						console.log('MAIN async loaded: ' + resolved)
+					}
+				} catch (e) {
+					console.warn('MAIN async load failed for ' + resolved, e)
+				}
+			}, 0)
+		}
 
 		var _origOpen = FS.open
 		FS.open = function (path, rawFlags) {
@@ -424,11 +449,10 @@ if (ENV_IS_WORKER) {
 				if (!isENOENT(e)) throw e
 				if (flags & 64) throw e
 				var resolved = PATH.isAbs(path) ? PATH.normalize(path) : PATH.join2(FS.cwd(), path)
-				// Check if file exists in the user's folder (synchronous lookup)
 				var clean = resolved.replace(/^\/+/, '').toLowerCase()
 				if (Module._dirIndex && Module._dirIndex.has(clean)) {
-					// We can't read it synchronously, but log the miss so we can improve
-					console.log('MAIN FS.open: file exists in folder but not in MEMFS: ' + resolved)
+					console.log('MAIN FS.open: async-loading: ' + resolved)
+					_triggerAsyncLoad(resolved, clean)
 				}
 				throw e
 			}
