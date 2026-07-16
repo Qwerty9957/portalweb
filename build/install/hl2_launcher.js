@@ -62,6 +62,13 @@ const ENV_IS_WORKER = typeof importScripts !== 'undefined'
 if (ENV_IS_WORKER) {
 	// ===================== WORKER (PTHREAD) =====================
 
+	// Workers don't have alert() - polyfill it to avoid crashes
+	if (typeof alert === 'undefined') {
+		self.alert = function(msg) {
+			console.error('WORKER alert:', msg);
+		}
+	}
+
 	let FS_LOCK = null
 	let FS_META = null
 	let FS_DATA = null
@@ -379,7 +386,16 @@ if (ENV_IS_WORKER) {
 	// Pre-load critical files into MEMFS before the engine starts.
 	// This is called from the shell.html click handler before callMain().
 	Module._preloadCriticalFiles = async function () {
-		var criticalFiles = ['/portal/gameinfo.txt', '/portal/fonts/GameFont.ttf', '/portal/portal.shader']
+		var criticalFiles = [
+			'/portal/gameinfo.txt',
+			'/portal/steam.inf',
+			'/portal/portal_pak_dir.vpk',
+			'/hl2/hl2_textures_dir.vpk',
+			'/hl2/hl2_sound_vo_english_dir.vpk',
+			'/hl2/hl2_sound_misc_dir.vpk',
+			'/hl2/hl2_misc_dir.vpk',
+			'/platform/platform_misc_dir.vpk'
+		]
 		for (const vfsPath of criticalFiles) {
 			var data = await Module._readFileFromFolder(vfsPath)
 			if (data) {
