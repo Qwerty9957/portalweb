@@ -183,7 +183,7 @@ if (ENV_IS_WORKER) {
 				if (!isENOENT(e)) throw e
 				if (flags & 64) throw e
 
-				const resolved = PATH.resolve(FS.cwd(), path)
+				const resolved = PATH.isAbs(path) ? PATH.normalize(path) : PATH.join2(FS.cwd(), path)
 				console.log('WORKER FS.open ENOENT: path=' + path + ' resolved=' + resolved)
 				if (lazyLoadFile(resolved)) {
 					console.log('WORKER FS.open: lazy-loaded ' + resolved)
@@ -199,7 +199,7 @@ if (ENV_IS_WORKER) {
 				return _origStat(path, dontFollow)
 			} catch (e) {
 				if (!isENOENT(e)) throw e
-				const resolved = PATH.resolve(FS.cwd(), path)
+				const resolved = PATH.isAbs(path) ? PATH.normalize(path) : PATH.join2(FS.cwd(), path)
 				if (lazyLoadFile(resolved)) {
 					return _origStat(path, dontFollow)
 				}
@@ -213,7 +213,7 @@ if (ENV_IS_WORKER) {
 				return _origLookupPath(path, opts)
 			} catch (e) {
 				if (!isENOENT(e)) throw e
-				const resolved = PATH.resolve(FS.cwd(), path)
+				const resolved = PATH.isAbs(path) ? PATH.normalize(path) : PATH.join2(FS.cwd(), path)
 				if (lazyLoadFile(resolved)) {
 					return _origLookupPath(path, opts)
 				}
@@ -407,7 +407,7 @@ if (ENV_IS_WORKER) {
 			} catch (e) {
 				if (!isENOENT(e)) throw e
 				if (flags & 64) throw e
-				var resolved = PATH.resolve(FS.cwd(), path)
+				var resolved = PATH.isAbs(path) ? PATH.normalize(path) : PATH.join2(FS.cwd(), path)
 				// Check if file exists in the user's folder (synchronous lookup)
 				var clean = resolved.replace(/^\/+/, '').toLowerCase()
 				if (Module._dirIndex && Module._dirIndex.has(clean)) {
