@@ -13,12 +13,38 @@ const ENV_IS_WORKER = typeof importScripts !== 'undefined'
 if (ENV_IS_WORKER) {
 	// ===================== WORKER (PTHREAD) =====================
 
-	const FS_LOCK = new Int32Array(Module._FS_SAB_LOCK)
-	const FS_META = new Int32Array(Module._FS_SAB_META)
-	const FS_DATA = new Uint8Array(Module._FS_SAB_DATA)
+	let FS_LOCK = null
+	let FS_META = null
+	let FS_DATA = null
 	let _populating = false
 
+	function initFSViews() {
+		if (FS_LOCK) return true
+		if (Module._FS_SAB_LOCK) {
+			FS_LOCK = new Int32Array(Module._FS_SAB_LOCK)
+			FS_META = new Int32Array(Module._FS_SAB_META)
+			FS_DATA = new Uint8Array(Module._FS_SAB_DATA)
+			return true
+		}
+		if (typeof wasmMemory !== 'undefined' && wasmMemory && HEAPU8) {
+			try {
+				var totalSize = 4 + 64 + 64 * 1024 * 1024
+				var offset = _malloc(totalSize)
+				FS_LOCK = new Int32Array(wasmMemory.buffer, offset, 1)
+				FS_META = new Int32Array(wasmMemory.buffer, offset + 4, 16)
+				FS_DATA = new Uint8Array(wasmMemory.buffer, offset + 68, 64 * 1024 * 1024)
+				Module._FS_HEAP_OFFSET = offset
+				return true
+			} catch (e) {
+				console.error('WORKER failed to allocate FS bridge in heap:', e)
+				return false
+			}
+		}
+		return false
+	}
+
 	function syncReadFile(vfsPath) {
+		if (!initFSViews()) return null
 		const p = new TextEncoder().encode(vfsPath.toLowerCase())
 		console.log('WORKER syncReadFile: path=' + vfsPath + ' pathLen=' + p.length)
 		if (p.length > FS_DATA.length) return null
@@ -41,6 +67,7 @@ if (ENV_IS_WORKER) {
 	}
 
 	function syncWriteFile(vfsPath, data) {
+		if (!initFSViews()) return false
 		const p = new TextEncoder().encode(vfsPath.toLowerCase())
 		if (8 + p.length + data.length > FS_DATA.length) return false
 
@@ -81,6 +108,11 @@ if (ENV_IS_WORKER) {
 
 	Module.preRun = Module.preRun || []
 	Module.preRun.push(function () {
+		if (!initFSViews()) {
+			console.error('WORKER prerun: FAILED to initialize FS bridge views')
+			return
+		}
+		console.log('WORKER prerun: FS bridge views ready' + (Module._FS_SAB_LOCK ? ' (from SABs)' : ' (from heap)'))
 		console.log('WORKER prerun: waiting for dir index...')
 		while (Atomics.load(FS_META, 4) === 0) {
 			Atomics.wait(FS_META, 4, 0, 100)
@@ -284,6 +316,7 @@ if (ENV_IS_WORKER) {
 		}
 		const allPaths = Array.from(Module._dirIndex.keys()).sort()
 		console.log('MAIN _sendFolderIndexToWorker: ' + allPaths.length + ' paths, first few: ' + allPaths.slice(0, 5).join(', '))
+		console.log('MAIN _sendFolderIndexToWorker: Has portal/gameinfo.txt? ' + Module._dirIndex.has('portal/gameinfo.txt') + (Module._dirIndex.has('gameinfo.txt') ? ' (found as gameinfo.txt without portal/ prefix - WRONG FOLDER?)' : ''))
 		const dirSet = new Set()
 		for (const fp of allPaths) {
 			const parts = fp.split('/')

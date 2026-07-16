@@ -331,6 +331,28 @@ canvas.emscripten { border: 0px none; background-color: black; }
       Module._FS_SAB_META = new SharedArrayBuffer(64);
       Module._FS_SAB_DATA = new SharedArrayBuffer(64 * 1024 * 1024);
 
+      // ====== Pthread worker SAB sharing ======
+      // Pass SharedArrayBuffers to pthread workers for the custom FS bridge.
+      // This runs before loadWasmModuleToAllWorkers is called (which happens during preRun).
+      Module.preInit = Module.preInit || [];
+      Module.preInit.push(function() {
+        if (typeof PThread !== 'undefined' && PThread.loadWasmModuleToWorker) {
+          var origLoadFn = PThread.loadWasmModuleToWorker.bind(PThread);
+          PThread.loadWasmModuleToWorker = function(worker) {
+            var origPost = worker.postMessage.bind(worker);
+            worker.postMessage = function(msg, transfers) {
+              if (msg && msg.cmd === 'load') {
+                msg._FS_SAB_LOCK = Module._FS_SAB_LOCK;
+                msg._FS_SAB_META = Module._FS_SAB_META;
+                msg._FS_SAB_DATA = Module._FS_SAB_DATA;
+              }
+              return origPost(msg, transfers);
+            };
+            return origLoadFn(worker);
+          };
+        }
+      });
+
       // Show crash overlay on unhandled error
       window.addEventListener('error', function(e) {
         showCrash(e.message || String(e.error));
