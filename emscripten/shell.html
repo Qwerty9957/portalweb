@@ -282,6 +282,16 @@
             selectedPathEl.textContent = 'No folder selected. Please select your Portal folder.';
             return;
           }
+          // Re-request permission — required after page reload
+          var perm = await handle.queryPermission({ mode: 'readwrite' });
+          if (perm !== 'granted') {
+            perm = await handle.requestPermission({ mode: 'readwrite' });
+          }
+          if (perm !== 'granted') {
+            _indexedHandle = null;
+            selectedPathEl.textContent = 'Permission denied. Please select your Portal folder again.';
+            return;
+          }
           var launchParams = launchParamsInput.value;
 
           playBtn.disabled = true;
