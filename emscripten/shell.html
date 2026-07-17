@@ -128,6 +128,10 @@
       var selectedPathEl = document.getElementById('selected-path');
       if (outputElement) outputElement.value = '';
 
+      // In-memory cache of the folder handle + index (set by selectAndIndexFolder)
+      var _indexedHandle = null;
+      var _dirIndex = null;
+
       canvasElement.addEventListener('webglcontextlost', (e) => {
         alert('WebGL context lost. You will need to reload the page.');
         e.preventDefault();
@@ -215,22 +219,17 @@
           launchParamsInput.value = savedParams;
         }
         if (savedHandle) {
-          var opts = { mode: 'readwrite' };
-          var perm = await savedHandle.queryPermission(opts);
-          if (perm === 'granted') {
-            playBtn.style.display = 'block';
-            launchParamsWrapper.style.display = 'block';
-          }
+          _indexedHandle = savedHandle;
+          playBtn.style.display = 'block';
+          launchParamsWrapper.style.display = 'block';
         }
       })();
 
-      // ====== Launch game with given params ======
-      async function launchGame(rootDirHandle, launchParams) {
+      // ====== Index and save folder (no launch) ======
+      async function selectAndIndexFolder(rootDirHandle, launchParams) {
         try {
-          playBtn.disabled = true;
           selectBtn.disabled = true;
-          playBtn.textContent = 'Loading...';
-
+          selectBtn.textContent = 'Indexing...';
           selectedPathEl.textContent = 'Indexing ' + rootDirHandle.name + '...';
 
           const dirIndex = new Map();
@@ -251,10 +250,63 @@
 
           selectedPathEl.textContent = rootDirHandle.name + ' (' + dirIndex.size + ' files indexed in ' + elapsed + 's)';
 
-          // Persist the handle and launch params for future visits
+          // Persist
           await saveHandle(rootDirHandle);
           await saveLaunchParams(launchParams);
           launchParamsWrapper.style.display = 'block';
+
+          // Store in memory for Play button
+          _indexedHandle = rootDirHandle;
+          _dirIndex = dirIndex;
+
+          // Show Play button (above Select)
+          playBtn.style.display = 'block';
+          selectBtn.disabled = false;
+          selectBtn.textContent = 'Select Portal Folder';
+        } catch (err) {
+          if (err.name === 'SecurityError' || err.name === 'AbortError') {
+            selectedPathEl.textContent = 'Access denied or cancelled. Please try again.';
+          } else {
+            selectedPathEl.textContent = 'Error: ' + err.message;
+          }
+          selectBtn.disabled = false;
+          selectBtn.textContent = 'Select Portal Folder';
+        }
+      }
+
+      // ====== Launch the engine (called by Play button) ======
+      async function launchGame() {
+        try {
+          var handle = _indexedHandle || await loadHandle();
+          if (!handle) {
+            selectedPathEl.textContent = 'No folder selected. Please select your Portal folder.';
+            return;
+          }
+          var launchParams = launchParamsInput.value;
+
+          playBtn.disabled = true;
+          selectBtn.disabled = true;
+          playBtn.textContent = 'Loading...';
+
+          // Index if not already indexed (e.g. after page reload)
+          if (!_dirIndex) {
+            selectedPathEl.textContent = 'Indexing ' + handle.name + '...';
+            _dirIndex = new Map();
+            async function indexDirectory(h, prefix) {
+              for await (const entry of h.values()) {
+                const path = prefix ? prefix + '/' + entry.name : entry.name;
+                if (entry.kind === 'file') {
+                  _dirIndex.set(path.toLowerCase(), entry);
+                } else if (entry.kind === 'directory') {
+                  await indexDirectory(entry, path);
+                }
+              }
+            }
+            const start = performance.now();
+            await indexDirectory(handle, '');
+            const elapsed = ((performance.now() - start) / 1000).toFixed(1);
+            selectedPathEl.textContent = handle.name + ' (' + _dirIndex.size + ' files indexed in ' + elapsed + 's)';
+          }
 
           // Set launch arguments on Module
           if (launchParams) {
@@ -262,8 +314,8 @@
           }
 
           // Share folder access with pre.js main-thread code
-          Module._rootHandle = rootDirHandle;
-          Module._dirIndex = dirIndex;
+          Module._rootHandle = handle;
+          Module._dirIndex = _dirIndex;
 
           // Send directory index to the worker thread
           if (Module._sendFolderIndexToWorker) {
@@ -287,30 +339,28 @@
         } catch (err) {
           if (err.name === 'SecurityError' || err.name === 'AbortError') {
             selectedPathEl.textContent = 'Access denied or cancelled. Please try again.';
+            _indexedHandle = null;
+            _dirIndex = null;
           } else {
             selectedPathEl.textContent = 'Error: ' + err.message;
           }
           playBtn.disabled = false;
           selectBtn.disabled = false;
           playBtn.textContent = 'Play Portal';
-          selectBtn.textContent = 'Select Portal Folder';
         }
       }
 
-      // ====== Play button (uses saved folder) ======
+      // ====== Play button ======
       playBtn.addEventListener('click', async function() {
-        var savedHandle = await loadHandle();
-        if (!savedHandle) return;
-        var params = launchParamsInput.value;
-        await launchGame(savedHandle, params);
+        await launchGame();
       });
 
-      // ====== Select folder button ======
+      // ====== Select folder button (no auto-launch) ======
       selectBtn.addEventListener('click', async () => {
         try {
           const rootDirHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
           var params = launchParamsInput.value;
-          await launchGame(rootDirHandle, params);
+          await selectAndIndexFolder(rootDirHandle, params);
         } catch (err) {
           if (err.name === 'SecurityError' || err.name === 'AbortError') {
             selectedPathEl.textContent = 'Access denied or cancelled. Please try again.';
