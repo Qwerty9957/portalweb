@@ -389,6 +389,7 @@ canvas.emscripten { border: 0px none; background-color: black; }
             return;
           }
           var launchParams = launchParamsInput.value;
+          await saveLaunchParams(launchParams);
 
           playBtn.disabled = true;
           selectBtn.disabled = true;

@@ -293,6 +293,7 @@
             return;
           }
           var launchParams = launchParamsInput.value;
+          await saveLaunchParams(launchParams);
 
           playBtn.disabled = true;
           selectBtn.disabled = true;
