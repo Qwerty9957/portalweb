@@ -89,6 +89,42 @@ if (ENV_IS_WORKER) {
 		return FS_META[3] === 0
 	}
 
+	function syncReadFileRange(vfsPath, offset, length) {
+		if (!initFSViews()) return null
+		const p = new TextEncoder().encode(vfsPath.toLowerCase())
+		if (p.length > FS_DATA.length) return null
+		FS_DATA.set(p, 0)
+		FS_META[0] = 3
+		FS_META[1] = p.length
+		FS_META[2] = offset
+		FS_META[3] = length
+
+		Atomics.store(FS_LOCK, 0, 1)
+		Atomics.notify(FS_LOCK, 0)
+		postMessage({ cmd: 'callHandler', handler: 'fsRequest', args: [] })
+		Atomics.wait(FS_LOCK, 0, 1)
+
+		if (FS_META[3] !== 0) return null
+		return FS_DATA.slice(0, FS_META[2])
+	}
+
+	function syncGetFileSize(vfsPath) {
+		if (!initFSViews()) return -1
+		const p = new TextEncoder().encode(vfsPath.toLowerCase())
+		if (p.length > FS_DATA.length) return -1
+		FS_DATA.set(p, 0)
+		FS_META[0] = 4
+		FS_META[1] = p.length
+
+		Atomics.store(FS_LOCK, 0, 1)
+		Atomics.notify(FS_LOCK, 0)
+		postMessage({ cmd: 'callHandler', handler: 'fsRequest', args: [] })
+		Atomics.wait(FS_LOCK, 0, 1)
+
+		if (FS_META[3] !== 0) return -1
+		return FS_META[2]
+	}
+
 	function lazyLoadFile(vfsPath) {
 		const data = syncReadFile(vfsPath)
 		if (!data) return false
@@ -196,6 +232,117 @@ if (ENV_IS_WORKER) {
 			}
 			return _origClose(stream)
 		}
+
+		// ===== VPK lazy streaming FS: intercept reads on VPK data chunks
+		// and fetch only the requested byte range from OPFS via SAB bridge,
+		// instead of loading the entire multi-GB file into MEMFS.
+		var _vpkFds = new Set()
+		var _vpkPattern = /_\d{3}\.vpk$/i
+		var _vpkSizes = new Map()
+
+		var _prevOpen = FS.open
+		FS.open = function (path, rawFlags) {
+			var prevError
+			try {
+				return _prevOpen(path, rawFlags)
+			} catch (e) {
+				if (!isENOENT(e)) throw e
+				if (rawFlags & 64) throw e
+				prevError = e
+			}
+			var resolved = PATH.isAbs(path) ? PATH.normalize(path) : PATH.join2(FS.cwd(), path)
+			var clean = resolved.replace(/^\/+/, '').toLowerCase()
+			if (_vpkPattern.test(clean)) {
+				var size = syncGetFileSize(resolved)
+				if (size > 0) {
+					var parts = resolved.split('/')
+					parts.pop()
+					if (parts.length) {
+						try { FS.mkdirTree(parts.join('/')) } catch (e) {}
+					}
+					_vpkSizes.set(clean, size)
+					FS.writeFile(resolved, new Uint8Array(1))
+					try {
+						var stream = _prevOpen(path, rawFlags)
+						stream._vpkSize = size
+						stream._vpkPath = clean
+						_vpkFds.add(stream.fd)
+						return stream
+					} catch (e2) { throw e2 }
+				}
+			}
+			throw prevError
+		}
+
+		var _prevSeek = FS.seek
+		FS.seek = function (stream, offset, whence) {
+			if (!stream) return -1
+			if (_vpkFds.has(stream.fd)) {
+				var pos = offset
+				if (whence === 1) pos = stream.position + offset
+				else if (whence === 2) pos = stream._vpkSize + offset
+				if (pos < 0) pos = 0
+				if (pos > stream._vpkSize) pos = stream._vpkSize
+				stream.position = pos
+				return pos
+			}
+			return _prevSeek(stream, offset, whence)
+		}
+
+		var _prevRead = FS.read
+		FS.read = function (stream, buffer, offset, length, position) {
+			if (!stream) return 0
+			if (_vpkFds.has(stream.fd)) {
+				var pos = (position >= 0) ? position : stream.position
+				var remaining = stream._vpkSize - pos
+				if (remaining <= 0) return 0
+				var toRead = Math.min(length, remaining)
+				var data = syncReadFileRange('/' + stream._vpkPath, pos, toRead)
+				if (data && data.length > 0) {
+					buffer.set(data, offset)
+					if (position < 0) stream.position += data.length
+					return data.length
+				}
+				return 0
+			}
+			return _prevRead(stream, buffer, offset, length, position)
+		}
+
+		var _prevStat = FS.stat
+		FS.stat = function (path, dontFollow) {
+			try {
+				var result = _prevStat(path, dontFollow)
+				var clean = path.replace(/^\/+/, '').toLowerCase()
+				if (_vpkSizes.has(clean)) {
+					result.size = _vpkSizes.get(clean)
+				}
+				return result
+			} catch (e) {
+				if (!isENOENT(e)) throw e
+				var resolved = PATH.isAbs(path) ? PATH.normalize(path) : PATH.join2(FS.cwd(), path)
+				var clean = resolved.replace(/^\/+/, '').toLowerCase()
+				if (_vpkPattern.test(clean)) {
+					var size = syncGetFileSize(resolved)
+					if (size > 0) {
+						_vpkSizes.set(clean, size)
+						var parts = resolved.split('/')
+						parts.pop()
+						if (parts.length) {
+							try { FS.mkdirTree(parts.join('/')) } catch (e) {}
+						}
+						FS.writeFile(resolved, new Uint8Array(1))
+						return _prevStat(path, dontFollow)
+					}
+				}
+				throw e
+			}
+		}
+
+		var _prevCloseStream = FS.close
+		FS.close = function (stream) {
+			if (stream) _vpkFds.delete(stream.fd)
+			return _prevCloseStream(stream)
+		}
 	}
 
 	// Intercept self.startWorker so our FS overrides run before the worker signals readiness
@@ -267,6 +414,27 @@ if (ENV_IS_WORKER) {
 		} else if (type === 2) {
 			const exists = Module._pathExistsInFolder(path)
 			_meta[3] = exists ? 0 : 1
+		} else if (type === 3) {
+			const offset = _meta[2]
+			const length = _meta[3]
+			const data = await Module._readFileRangeFromFolder(path, offset, length)
+			if (data) {
+				_data.set(data, 0)
+				_meta[2] = data.length
+				_meta[3] = 0
+			} else {
+				_meta[2] = 0
+				_meta[3] = 1
+			}
+		} else if (type === 4) {
+			const size = await Module._getFileSizeFromFolder(path)
+			if (size >= 0) {
+				_meta[2] = size
+				_meta[3] = 0
+			} else {
+				_meta[2] = 0
+				_meta[3] = 1
+			}
 		}
 
 		Atomics.store(_lock, 0, 0)
@@ -284,6 +452,23 @@ if (ENV_IS_WORKER) {
 		if (!handle) return null
 		const file = await handle.getFile()
 		return new Uint8Array(await file.arrayBuffer())
+	}
+
+	Module._readFileRangeFromFolder = async function (path, offset, length) {
+		const clean = path.replace(/^\/+/, '').toLowerCase()
+		const handle = Module._dirIndex && Module._dirIndex.get(clean)
+		if (!handle) return null
+		const file = await handle.getFile()
+		const blob = file.slice(offset, offset + length)
+		return new Uint8Array(await blob.arrayBuffer())
+	}
+
+	Module._getFileSizeFromFolder = async function (path) {
+		const clean = path.replace(/^\/+/, '').toLowerCase()
+		const handle = Module._dirIndex && Module._dirIndex.get(clean)
+		if (!handle) return -1
+		const file = await handle.getFile()
+		return file.size
 	}
 
 	Module._writeFileToFolder = async function (path, data) {
@@ -350,48 +535,17 @@ if (ENV_IS_WORKER) {
 			'/hl2/hl2_misc_dir.vpk',
 			'/platform/platform_misc_dir.vpk'
 		]
-		// Scan for VPK data chunk files (*_NNN.vpk) that the engine needs
-		// to extract game assets. Portal's own chunks are always loaded;
-		// other VPK data is loaded up to a 300MB total limit.
+		// VPK data chunk files (*_NNN.vpk) are NOT preloaded into MEMFS.
+		// Instead, they are streamed on demand via the worker's lazy VPK FS,
+		// which fetches only the requested byte ranges from OPFS using the
+		// SAB bridge (syncReadFileRange). This avoids OOM on large VPKs.
 		if (Module._dirIndex) {
 			var vpkDataPattern = /_\d{3}\.vpk$/i
-			var portalChunks = []
-			var otherChunks = []
-			var portalSize = 0
-			var otherSize = 0
-			var maxOtherSize = 300 * 1024 * 1024
+			var vpkCount = 0
 			for (var entry of Module._dirIndex.entries()) {
-				var relPath = entry[0]
-				if (!vpkDataPattern.test(relPath)) continue
-				var s = 0
-				try { s = (await entry[1].getFile()).size } catch (e) { continue }
-				if (relPath.startsWith('portal/')) {
-					portalChunks.push(relPath)
-					portalSize += s
-				} else {
-					otherChunks.push(relPath)
-					otherSize += s
-				}
+				if (vpkDataPattern.test(entry[0])) vpkCount++
 			}
-			// Portal chunks always loaded
-			for (var p of portalChunks) { criticalFiles.push('/' + p) }
-			console.log('MAIN preload: ' + portalChunks.length + ' Portal VPK chunks (~' + (portalSize/1024/1024).toFixed(1) + 'MB)')
-			// Other VPK data chunks up to the limit
-			var loadedOther = 0
-			for (var o of otherChunks) {
-				try {
-					var sz = (await Module._dirIndex.get(o).getFile()).size
-					if (loadedOther + sz > maxOtherSize) {
-						console.warn('MAIN preload: skipping ' + o + ' (other VPK data exceeds 300MB limit)')
-						continue
-					}
-					loadedOther += sz
-					criticalFiles.push('/' + o)
-				} catch (e) { continue }
-			}
-			if (loadedOther > 0) {
-				console.log('MAIN preload: ' + otherChunks.length + ' other VPK chunks (~' + (loadedOther/1024/1024).toFixed(1) + 'MB loaded)')
-			}
+			console.log('MAIN preload: ' + vpkCount + ' VPK data chunks will be streamed on demand')
 		}
 		for (const vfsPath of criticalFiles) {
 			var data = await Module._readFileFromFolder(vfsPath)
